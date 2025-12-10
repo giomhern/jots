@@ -58,9 +58,47 @@ def validate_customer_payload(data: dict):
     
     return True, None
 
+def validate_add_funds_payload(data: dict):
+    """
+    Validate the JSON payload for adding funds.
+
+    Returns:
+        (is_valid: bool, error_message: str | None)
+    """
+      
+    if not isinstance(data, dict):
+        return False, "Request body must be a JSON object."
+    
+    amount = data.get("amount")
+    description = data.get("description")
+
+
+    if not isinstance(amount, int) or amount <= 0:
+        return False, "Amount is required, must to be an integer and must be greater than 0."
+    
+    if description is not None:
+        if not isinstance(description, str) or not description.strip():
+            return False, "Description must be non-empty string."
+
+    
+    return True, None 
+
+
+def get_customer_or_404(customer_id: str):
+    customer = CUSTOMERS.get(customer_id)
+
+    if customer is None:
+       return None, error_response(f"Customer with {customer_id} not found.", status_code=404, error_type="not_found")
+    
+    return customer, None
+
+
+# --- helper functions ---
+
 
 # in-memory database
 CUSTOMERS = {} 
+CHARGES = {}
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -99,7 +137,8 @@ def create_customer():
         "id": customer_id,
         "name": data["name"].strip(), 
         "email": data["email"].strip(), 
-        "created_at": iso_utc_now()
+        "created_at": iso_utc_now(), 
+        "balance": 0
     }
 
     CUSTOMERS[customer_id] = customer 
@@ -122,7 +161,7 @@ def list_customers():
     customers_list = list(CUSTOMERS.values())
     return jsonify({"data": customers_list}), 200
 
-@app.route("/customers/<customer_id", methods=["GET"])
+@app.route("/customers/<customer_id>", methods=["GET"])
 def get_customer(customer_id):
     """
     Retrieve a single customer by ID.
@@ -146,6 +185,79 @@ def get_customer(customer_id):
     
     return jsonify(customer), 200
 
+@app.route("/customers/<customer_id>/credit", methods=["POST"])
+def credit_customer(customer_id):
+    """
+    Add funds/credits to a customer's balance.
+
+    Body:
+    {
+      "amount": 5000,
+      "description": "optional"
+    }
+    """
+
+    customer, error = get_customer_or_404(customer_id=customer_id)
+    if error is not None:
+        return error 
+    
+    data = request.get_json(silent=True)
+
+    is_valid, error = validate_add_funds_payload(data=data)
+    if not is_valid:
+        return error_response(error, 400, "invalid_request")
+    
+    amount = data.get("amount")
+    customer["balance"] += amount 
+
+    return jsonify(customer), 200
+    
+@app.route("/charges", methods=["POST"])
+def create_charge():
+    """
+    Create a charge against a customer's balance.
+
+    Body:
+    {
+      "customer_id": "<id>",
+      "amount": 2500,
+      "description": "optional"
+    }
+    """
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return error_response("Request body must be a JSON object.", 400, "invalid_request")
+
+    customer_id = data.get("customer_id")
+    description = data.get("description")
+    amount = data.get("amount")
+
+    customer, error = get_customer_or_404(customer_id=customer_id)
+
+    if error is not None:
+        return error
+    
+    if not isinstance(amount, int) or amount <= 0:
+        return error_response("Amount must be a non-negative integer.", 400, "invalid_request")
+    
+    if amount > customer['balance']:
+        return error_response("Amount exceeds customer's balance.", 400, "insufficient_funds")
+    
+    customer['balance'] -= amount
+
+    charge_id = str(uuid.uuid4())
+    charge = {
+        "id": charge_id, 
+        "customer_id": customer_id, 
+        "amount": amount, 
+        "description": description, 
+        "created_at": iso_utc_now(), 
+        "status": "succeeded"
+    }
+
+    CHARGES[charge_id] = charge
+    return jsonify(charge), 201
 
 
 if __name__ == "__main__":
