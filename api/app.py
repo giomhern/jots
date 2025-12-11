@@ -1,13 +1,27 @@
 # app.py 
 
 from flask import Flask, json, request, jsonify
+from functools import wraps
 from datetime import datetime 
 import uuid 
 
 app = Flask(__name__)
 
-# --- helper functions ---
+# --- global vars ---
 
+CUSTOMERS = {} 
+CHARGES = {}
+TRANSACTIONS = []
+IDEMPOTENCY_STORE = {}
+
+VALID_API_KEYS = {
+    "test_secret_123"
+}
+
+# --- global vars ---
+
+
+# --- helper functions ---
 def iso_utc_now() -> str:
     """Return current time in ISO8601 UTC with 'Z' suffix."""
     return datetime.utcnow().isoformat() + "Z"
@@ -108,13 +122,52 @@ def record_transaction(customer_id: str, kind: str, amount: int, balance_after: 
 
     return transaction
 
+
+def require_api_key(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        api_key = request.headers.get("X-API-Key")
+
+        if api_key not in VALID_API_KEYS:
+            return error_response("Invalid or missing API key.", 401, "unauthorized")
+        return fn(*args, **kwargs)
+    return wrapper 
+
+def check_idempotency():
+    """
+    Check if this request has an Idempotency-Key that we've seen before.
+    If yes, return (response, True).
+    If no key or not seen before, return (None, False).
+    """
+
+    key = request.headers.get("Idempotency")
+
+    if not key:
+        return None, False
+    
+    entry = IDEMPOTENCY_STORE.get(key)
+
+    if entry is None:
+        return None, False 
+    
+    return (jsonify(entry["body"], entry["status_code"])), True 
+
+def store_idempotent_response(body: dict, status_code: int):
+    """
+    Store the response for the current request's Idempotency-Key, if present.
+    """
+
+    key = request.headers.get("Idempotency-Key")
+    if not key:
+        return
+    
+    IDEMPOTENCY_STORE[key] = {
+        "body": body, 
+        "status_code": status_code
+    }
+
+    
 # --- helper functions ---
-
-
-# in-memory database
-CUSTOMERS = {} 
-CHARGES = {}
-TRANSACTIONS = []
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -122,6 +175,7 @@ def health():
 
 
 @app.route("/customers", methods=["POST"])
+@require_api_key
 def create_customer():
     """
     Create a new customer.
@@ -161,6 +215,7 @@ def create_customer():
     return jsonify(customer), 201
 
 @app.route("/customers", methods=["GET"])
+@require_api_key
 def list_customers():
     """
     List all customers.
@@ -178,6 +233,7 @@ def list_customers():
     return jsonify({"data": customers_list}), 200
 
 @app.route("/customers/<customer_id>", methods=["GET"])
+@require_api_key
 def get_customer(customer_id):
     """
     Retrieve a single customer by ID.
@@ -202,6 +258,7 @@ def get_customer(customer_id):
     return jsonify(customer), 200
 
 @app.route("/customers/<customer_id>/credit", methods=["POST"])
+@require_api_key
 def credit_customer(customer_id):
     """
     Add funds/credits to a customer's balance.
@@ -212,6 +269,10 @@ def credit_customer(customer_id):
       "description": "optional"
     }
     """
+
+    replay, is_replay = check_idempotency()
+    if is_replay:
+        return replay
 
     customer, error = get_customer_or_404(customer_id=customer_id)
     if error is not None:
@@ -242,6 +303,7 @@ def credit_customer(customer_id):
     return jsonify(customer), 200
     
 @app.route("/charges", methods=["POST"])
+@require_api_key
 def create_charge():
     """
     Create a charge against a customer's balance.
@@ -253,6 +315,10 @@ def create_charge():
       "description": "optional"
     }
     """
+
+    replay, is_replay = check_idempotency()
+    if is_replay:
+        return replay
 
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -301,6 +367,7 @@ def create_charge():
 
 
 @app.route("/customers/<customer_id>/transactions", methods=["GET"])
+@require_api_key
 def list_customer_transactions(customer_id):
     """
     List a customer's transactions (ledger entries).
