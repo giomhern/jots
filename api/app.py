@@ -92,6 +92,21 @@ def get_customer_or_404(customer_id: str):
     
     return customer, None
 
+def record_transaction(customer_id: str, kind: str, amount: int, balance_after: int, description: str | None = None, related_id: str | None = None):
+    transaction = {
+        "id": str(uuid.uuid4()),
+        "customer_id": customer_id,
+        "type": kind,  # "credit" or "charge"
+        "amount": amount,
+        "description": description,
+        "balance_after": balance_after,
+        "related_id": related_id,
+        "created_at": iso_utc_now(),
+    }
+
+    TRANSACTIONS.append(transaction)
+
+    return transaction
 
 # --- helper functions ---
 
@@ -99,6 +114,7 @@ def get_customer_or_404(customer_id: str):
 # in-memory database
 CUSTOMERS = {} 
 CHARGES = {}
+TRANSACTIONS = []
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -210,6 +226,19 @@ def credit_customer(customer_id):
     amount = data.get("amount")
     customer["balance"] += amount 
 
+    balance_after = customer["balance"]
+
+    description = data.get("description")
+
+    record_transaction(
+        customer_id=customer_id, 
+        kind="credit", 
+        amount=amount, 
+        balance_after=balance_after, 
+        description=description, 
+        related_id=None
+    )
+
     return jsonify(customer), 200
     
 @app.route("/charges", methods=["POST"])
@@ -245,6 +274,7 @@ def create_charge():
         return error_response("Amount exceeds customer's balance.", 400, "insufficient_funds")
     
     customer['balance'] -= amount
+    balance_after = customer['balance']
 
     charge_id = str(uuid.uuid4())
     charge = {
@@ -257,7 +287,49 @@ def create_charge():
     }
 
     CHARGES[charge_id] = charge
+
+    record_transaction(
+        customer_id=customer_id, 
+        kind="charge", 
+        amount=amount, 
+        balance_after=balance_after, 
+        description=description, 
+        related_id=charge_id
+    )
+
     return jsonify(charge), 201
+
+
+@app.route("/customers/<customer_id>/transactions", methods=["GET"])
+def list_customer_transactions(customer_id):
+    """
+    List a customer's transactions (ledger entries).
+
+    Optional query params:
+      - limit: int, default 50
+    """
+
+    customer, err = get_customer_or_404(customer_id=customer_id)
+
+    if customer is None:
+        return err 
+    
+    limit_param = request.args.get("limit")
+
+    try:
+        limit = int(limit_param) if limit_param is not None else 50
+    except ValueError:
+        return error_response("Limit must be an integer.", 400, "invalid_request")
+    
+    if limit <= 0:
+        return error_response("Limit must be positive.", 400, "invalid_request")
+    
+    customer_txns = [t for t in TRANSACTIONS if t['customer_id'] == customer_id]
+    customer_txns.sort(key=lambda t: t["created_at"], reverse=True)
+
+    customer_txns[:limit]
+
+    return jsonify({"data": customer_txns}), 200
 
 
 if __name__ == "__main__":
